@@ -1,0 +1,1231 @@
+{
+  "nbformat": 4,
+  "nbformat_minor": 0,
+  "metadata": {
+    "colab": {
+      "name": "neural_machine_translation_with_transformer",
+      "provenance": [],
+      "collapsed_sections": [],
+      "toc_visible": true
+    },
+    "kernelspec": {
+      "display_name": "Python 3",
+      "language": "python",
+      "name": "python3"
+    },
+    "language_info": {
+      "codemirror_mode": {
+        "name": "ipython",
+        "version": 3
+      },
+      "file_extension": ".py",
+      "mimetype": "text/x-python",
+      "name": "python",
+      "nbconvert_exporter": "python",
+      "pygments_lexer": "ipython3",
+      "version": "3.7.0"
+    },
+    "accelerator": "GPU"
+  },
+  "cells": [
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "RGVU8dNXXIja"
+      },
+      "source": [
+        "# English-to-Spanish translation with a sequence-to-sequence Transformer\n",
+        "\n",
+        "**Author:** [fchollet](https://twitter.com/fchollet)<br>\n",
+        "**Date created:** 2021/05/26<br>\n",
+        "**Last modified:** 2021/05/26<br>\n",
+        "**Description:** Implementing a sequence-to-sequene Transformer and training it on a machine translation task."
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "0XUbMP54XIjp"
+      },
+      "source": [
+        "## Introduction\n",
+        "\n",
+        "In this example, we'll build a sequence-to-sequence Transformer model, which\n",
+        "we'll train on an English-to-Spanish machine translation task.\n",
+        "\n",
+        "You'll learn how to:\n",
+        "\n",
+        "- Vectorize text using the Keras `TextVectorization` layer.\n",
+        "- Implement a `TransformerEncoder` layer, a `TransformerDecoder` layer,\n",
+        "and a `PositionalEmbedding` layer.\n",
+        "- Prepare data for training a sequence-to-sequence model.\n",
+        "- Use the trained model to generate translations of never-seen-before\n",
+        "input sentences (sequence-to-sequence inference).\n",
+        "\n",
+        "The code featured here is adapted from the book\n",
+        "[Deep Learning with Python, Second Edition](https://www.manning.com/books/deep-learning-with-python-second-edition)\n",
+        "(chapter 11: Deep learning for text).\n",
+        "The present example is fairly barebones, so for detailed explanations of\n",
+        "how each building block works, as well as the theory behind Transformers,\n",
+        "I recommend reading the book."
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "1XC2uSopXIjr"
+      },
+      "source": [
+        "## Setup"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "6TTXK3grXIjs"
+      },
+      "source": [
+        "import pathlib\n",
+        "import random\n",
+        "import string\n",
+        "import re\n",
+        "import numpy as np\n",
+        "import tensorflow as tf\n",
+        "from tensorflow import keras\n",
+        "from tensorflow.keras import layers\n",
+        "from tensorflow.keras.layers import TextVectorization"
+      ],
+      "execution_count": 14,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "ECK0SY71XIjv"
+      },
+      "source": [
+        "## Downloading the data\n",
+        "\n",
+        "We'll be working with an English-to-Spanish translation dataset\n",
+        "provided by [Anki](https://www.manythings.org/anki/). Let's download it:"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "2lkjhZ4dXIjw"
+      },
+      "source": [
+        "text_file = keras.utils.get_file(\n",
+        "    fname=\"spa-eng.zip\",\n",
+        "    origin=\"http://storage.googleapis.com/download.tensorflow.org/data/spa-eng.zip\",\n",
+        "    extract=True,\n",
+        ")\n",
+        "text_file = pathlib.Path(text_file).parent / \"spa-eng\" / \"spa.txt\""
+      ],
+      "execution_count": 15,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "i7-h3V-3XIjy"
+      },
+      "source": [
+        "## Parsing the data\n",
+        "\n",
+        "Each line contains an English sentence and its corresponding Spanish sentence.\n",
+        "The English sentence is the *source sequence* and Spanish one is the *target sequence*.\n",
+        "We prepend the token `\"[start]\"` and we append the token `\"[end]\"` to the Spanish sentence."
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "3ghezIbKXIjz"
+      },
+      "source": [
+        "with open(text_file) as f:\n",
+        "    lines = f.read().split(\"\\n\")[:-1]\n",
+        "text_pairs = []\n",
+        "for line in lines:\n",
+        "    eng, spa = line.split(\"\\t\")\n",
+        "    spa = \"[start] \" + spa + \" [end]\"\n",
+        "    text_pairs.append((eng, spa))"
+      ],
+      "execution_count": 16,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "v-PD1ZpfluNb",
+        "outputId": "c1d7a65d-352c-4341-f455-bd5d81157243",
+        "colab": {
+          "base_uri": "https://localhost:8080/"
+        }
+      },
+      "source": [
+        "len(text_pairs)"
+      ],
+      "execution_count": 30,
+      "outputs": [
+        {
+          "output_type": "execute_result",
+          "data": {
+            "text/plain": [
+              "118964"
+            ]
+          },
+          "metadata": {},
+          "execution_count": 30
+        }
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "Ap7uXms1lxdI",
+        "outputId": "dc061b8a-34ca-432f-906b-39c1fec36b98",
+        "colab": {
+          "base_uri": "https://localhost:8080/"
+        }
+      },
+      "source": [
+        "text_pairs[0]"
+      ],
+      "execution_count": 31,
+      "outputs": [
+        {
+          "output_type": "execute_result",
+          "data": {
+            "text/plain": [
+              "('He is very kind to me.', '[start] Él es muy lindo conmigo. [end]')"
+            ]
+          },
+          "metadata": {},
+          "execution_count": 31
+        }
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "0_fbUyM2XIj4"
+      },
+      "source": [
+        "Here's what our sentence pairs look like:"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "E-WuGFfrXIj6",
+        "outputId": "ef78ae88-599b-4e46-f9df-9f966b2bab3c",
+        "colab": {
+          "base_uri": "https://localhost:8080/"
+        }
+      },
+      "source": [
+        "for _ in range(5):\n",
+        "    print(random.choice(text_pairs))"
+      ],
+      "execution_count": 17,
+      "outputs": [
+        {
+          "output_type": "stream",
+          "name": "stdout",
+          "text": [
+            "(\"You don't seem very concerned.\", '[start] No pareces muy preocupado. [end]')\n",
+            "(\"It's a dead giveaway.\", '[start] Es una clara señal. [end]')\n",
+            "(\"You can't park your car here.\", '[start] No puede aparcar aquí. [end]')\n",
+            "('I like your house.', '[start] Me gusta tu casa. [end]')\n",
+            "(\"I didn't ask Tom to wait for me.\", '[start] No le pedí a Tom que me esperara. [end]')\n"
+          ]
+        }
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "SdT9O0McXIj8"
+      },
+      "source": [
+        "Now, let's split the sentence pairs into a training set, a validation set,\n",
+        "and a test set."
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "8G0_QeEHXIj9",
+        "outputId": "1c49dd13-bda9-4c24-9399-0c7267faffe7",
+        "colab": {
+          "base_uri": "https://localhost:8080/"
+        }
+      },
+      "source": [
+        "random.shuffle(text_pairs)\n",
+        "num_val_samples = int(0.15 * len(text_pairs))\n",
+        "num_train_samples = len(text_pairs) - 2 * num_val_samples\n",
+        "train_pairs = text_pairs[:num_train_samples]\n",
+        "val_pairs = text_pairs[num_train_samples : num_train_samples + num_val_samples]\n",
+        "test_pairs = text_pairs[num_train_samples + num_val_samples :]\n",
+        "\n",
+        "print(f\"{len(text_pairs)} total pairs\")\n",
+        "print(f\"{len(train_pairs)} training pairs\")\n",
+        "print(f\"{len(val_pairs)} validation pairs\")\n",
+        "print(f\"{len(test_pairs)} test pairs\")"
+      ],
+      "execution_count": 18,
+      "outputs": [
+        {
+          "output_type": "stream",
+          "name": "stdout",
+          "text": [
+            "118964 total pairs\n",
+            "83276 training pairs\n",
+            "17844 validation pairs\n",
+            "17844 test pairs\n"
+          ]
+        }
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "c5Vw2VZ9pypT",
+        "outputId": "0a9a1af8-fb5c-4736-8c5c-febefd62b815",
+        "colab": {
+          "base_uri": "https://localhost:8080/"
+        }
+      },
+      "source": [
+        "test_pairs[0]"
+      ],
+      "execution_count": 55,
+      "outputs": [
+        {
+          "output_type": "execute_result",
+          "data": {
+            "text/plain": [
+              "('He was exhausted when he got home.',\n",
+              " '[start] Él estaba exhausto cuando llegó a casa. [end]')"
+            ]
+          },
+          "metadata": {},
+          "execution_count": 55
+        }
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "_iQUj0ZwXIj-"
+      },
+      "source": [
+        "## Vectorizing the text data\n",
+        "\n",
+        "We'll use two instances of the `TextVectorization` layer to vectorize the text\n",
+        "data (one for English and one for Spanish),\n",
+        "that is to say, to turn the original strings into integer sequences\n",
+        "where each integer represents the index of a word in a vocabulary.\n",
+        "\n",
+        "The English layer will use the default string standardization (strip punctuation characters)\n",
+        "and splitting scheme (split on whitespace), while\n",
+        "the Spanish layer will use a custom standardization, where we add the character\n",
+        "`\"¿\"` to the set of punctuation characters to be stripped.\n",
+        "\n",
+        "Note: in a production-grade machine translation model, I would not recommend\n",
+        "stripping the punctuation characters in either language. Instead, I would recommend turning\n",
+        "each punctuation character into its own token,\n",
+        "which you could achieve by providing a custom `split` function to the `TextVectorization` layer."
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "Qx9BouLYl449"
+      },
+      "source": [
+        "##对文本数据进行矢量化\n",
+        "\n",
+        "我们将使用 \"TextVectorization \"层的两个实例来对文本数据进行矢量化。\n",
+        "数据（一个用于英语，一个用于西班牙语）。\n",
+        "也就是说，将原始字符串变成整数序列\n",
+        "其中每个整数代表词汇表中的一个词的索引。\n",
+        "\n",
+        "英语层将使用默认的字符串标准化（去除标点符号\n",
+        "和分割方案（在空白处分割），而\n",
+        "而西班牙语层将使用一个自定义的标准化，我们在其中添加字符\n",
+        "`\"¿\"`到要剥离的标点符号集合中。\n",
+        "\n",
+        "注意：在一个生产级的机器翻译模型中，我不建议\n",
+        "剥离两种语言中的标点符号。相反，我建议将\n",
+        "把每个标点符号变成自己的标记。\n",
+        "你可以通过为 \"文本矢量化 \"层提供一个自定义的 \"分割 \"函数来实现。"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "GWVMvv0vXIkA"
+      },
+      "source": [
+        "strip_chars = string.punctuation + \"¿\"\n",
+        "strip_chars = strip_chars.replace(\"[\", \"\")\n",
+        "strip_chars = strip_chars.replace(\"]\", \"\")\n",
+        "\n",
+        "vocab_size = 15000\n",
+        "sequence_length = 20\n",
+        "batch_size = 64\n",
+        "\n",
+        "\n",
+        "def custom_standardization(input_string):\n",
+        "    lowercase = tf.strings.lower(input_string)\n",
+        "    return tf.strings.regex_replace(lowercase, \"[%s]\" % re.escape(strip_chars), \"\")\n",
+        "\n",
+        "\n",
+        "eng_vectorization = TextVectorization(\n",
+        "    max_tokens=vocab_size, output_mode=\"int\", output_sequence_length=sequence_length,\n",
+        ")\n",
+        "spa_vectorization = TextVectorization(\n",
+        "    max_tokens=vocab_size,\n",
+        "    output_mode=\"int\",\n",
+        "    output_sequence_length=sequence_length + 1,\n",
+        "    standardize=custom_standardization,\n",
+        ")\n",
+        "train_eng_texts = [pair[0] for pair in train_pairs]\n",
+        "train_spa_texts = [pair[1] for pair in train_pairs]\n",
+        "eng_vectorization.adapt(train_eng_texts)\n",
+        "spa_vectorization.adapt(train_spa_texts)"
+      ],
+      "execution_count": 32,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "HBCaMq1MmuqI",
+        "outputId": "cbf6d357-3224-4298-c009-62c12c06ec08",
+        "colab": {
+          "base_uri": "https://localhost:8080/"
+        }
+      },
+      "source": [
+        "eng_vectorization"
+      ],
+      "execution_count": 42,
+      "outputs": [
+        {
+          "output_type": "execute_result",
+          "data": {
+            "text/plain": [
+              "<keras.layers.preprocessing.text_vectorization.TextVectorization at 0x7ff38b84d890>"
+            ]
+          },
+          "metadata": {},
+          "execution_count": 42
+        }
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "Z9CtmW1NmHMB",
+        "outputId": "f7ffbfa8-3540-44ee-bade-c3533057c684",
+        "colab": {
+          "base_uri": "https://localhost:8080/",
+          "height": 34
+        }
+      },
+      "source": [
+        "train_spa_texts[0]"
+      ],
+      "execution_count": 35,
+      "outputs": [
+        {
+          "output_type": "execute_result",
+          "data": {
+            "application/vnd.google.colaboratory.intrinsic+json": {
+              "type": "string"
+            },
+            "text/plain": [
+              "'[start] Él es muy lindo conmigo. [end]'"
+            ]
+          },
+          "metadata": {},
+          "execution_count": 35
+        }
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "pQUQ7l-zmBSw",
+        "outputId": "b3012059-45b2-4d78-a8b8-609d87aa3556",
+        "colab": {
+          "base_uri": "https://localhost:8080/",
+          "height": 34
+        }
+      },
+      "source": [
+        "train_eng_texts[0]"
+      ],
+      "execution_count": 36,
+      "outputs": [
+        {
+          "output_type": "execute_result",
+          "data": {
+            "application/vnd.google.colaboratory.intrinsic+json": {
+              "type": "string"
+            },
+            "text/plain": [
+              "'He is very kind to me.'"
+            ]
+          },
+          "metadata": {},
+          "execution_count": 36
+        }
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "hupurzzImLcu"
+      },
+      "source": [
+        "eng_vectorization.adapt(train_eng_texts)"
+      ],
+      "execution_count": 37,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "ImdXD4umXIkD"
+      },
+      "source": [
+        "Next, we'll format our datasets.\n",
+        "\n",
+        "At each training step, the model will seek to predict target words N+1 (and beyond)\n",
+        "using the source sentence and the target words 0 to N.\n",
+        "\n",
+        "As such, the training dataset will yield a tuple `(inputs, targets)`, where:\n",
+        "\n",
+        "- `inputs` is a dictionary with the keys `encoder_inputs` and `decoder_inputs`.\n",
+        "`encoder_inputs` is the vectorized source sentence and `encoder_inputs` is the target sentence \"so far\",\n",
+        "that is to say, the words 0 to N used to predict word N+1 (and beyond) in the target sentence.\n",
+        "- `target` is the target sentence offset by one step:\n",
+        "it provides the next words in the target sentence -- what the model will try to predict."
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "RVu-jP9Im8nb",
+        "outputId": "4ed54a84-768c-427e-d959-373844a5f495",
+        "colab": {
+          "base_uri": "https://localhost:8080/"
+        }
+      },
+      "source": [
+        "eng_vectorization(\"You don't seem very concerned.\")"
+      ],
+      "execution_count": 43,
+      "outputs": [
+        {
+          "output_type": "execute_result",
+          "data": {
+            "text/plain": [
+              "<tf.Tensor: shape=(20,), dtype=int64, numpy=\n",
+              "array([   5,   22,  520,   54, 2121,    0,    0,    0,    0,    0,    0,\n",
+              "          0,    0,    0,    0,    0,    0,    0,    0,    0])>"
+            ]
+          },
+          "metadata": {},
+          "execution_count": 43
+        }
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "iz-5jsKCnDIj",
+        "outputId": "71724f9d-9737-40a5-aa70-73a6ec978731",
+        "colab": {
+          "base_uri": "https://localhost:8080/"
+        }
+      },
+      "source": [
+        "spa_vectorization('No pareces muy preocupado.')"
+      ],
+      "execution_count": 44,
+      "outputs": [
+        {
+          "output_type": "execute_result",
+          "data": {
+            "text/plain": [
+              "<tf.Tensor: shape=(21,), dtype=int64, numpy=\n",
+              "array([   7,  731,   39, 1133,    0,    0,    0,    0,    0,    0,    0,\n",
+              "          0,    0,    0,    0,    0,    0,    0,    0,    0,    0])>"
+            ]
+          },
+          "metadata": {},
+          "execution_count": 44
+        }
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "ljMyXtdimaRg"
+      },
+      "source": [
+        "def format_dataset(eng, spa):\n",
+        "    eng = eng_vectorization(eng)\n",
+        "    spa = spa_vectorization(spa)\n",
+        "    return ({\"encoder_inputs\": eng, \"decoder_inputs\": spa[:, :-1],}, spa[:, 1:])"
+      ],
+      "execution_count": 39,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "P84fFoIumc8A"
+      },
+      "source": [
+        "# format_dataset(\"You don't seem very concerned.\", 'No pareces muy preocupado.')"
+      ],
+      "execution_count": 45,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "kqZiUFxTXIkF"
+      },
+      "source": [
+        "def make_dataset(pairs):\n",
+        "    eng_texts, spa_texts = zip(*pairs)\n",
+        "    eng_texts = list(eng_texts)\n",
+        "    spa_texts = list(spa_texts)\n",
+        "    dataset = tf.data.Dataset.from_tensor_slices((eng_texts, spa_texts))\n",
+        "    dataset = dataset.batch(batch_size)\n",
+        "    dataset = dataset.map(format_dataset)\n",
+        "    return dataset.shuffle(2048).prefetch(16).cache()\n",
+        "\n",
+        "\n",
+        "train_ds = make_dataset(train_pairs)\n",
+        "val_ds = make_dataset(val_pairs)"
+      ],
+      "execution_count": 20,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "uVtOD97jmSRy",
+        "outputId": "94e9608f-7307-4871-d772-e905f7456170",
+        "colab": {
+          "base_uri": "https://localhost:8080/"
+        }
+      },
+      "source": [
+        "train_ds"
+      ],
+      "execution_count": 38,
+      "outputs": [
+        {
+          "output_type": "execute_result",
+          "data": {
+            "text/plain": [
+              "<CacheDataset shapes: ({encoder_inputs: (None, 20), decoder_inputs: (None, 20)}, (None, 20)), types: ({encoder_inputs: tf.int64, decoder_inputs: tf.int64}, tf.int64)>"
+            ]
+          },
+          "metadata": {},
+          "execution_count": 38
+        }
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "QLCX8kWAXIkG"
+      },
+      "source": [
+        "Let's take a quick look at the sequence shapes\n",
+        "(we have batches of 64 pairs, and all sequences are 20 steps long):"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "i3JnZ_HeXIkH",
+        "outputId": "4f1fcb6b-d821-4e66-b5a3-b89c030db41f",
+        "colab": {
+          "base_uri": "https://localhost:8080/"
+        }
+      },
+      "source": [
+        "for inputs, targets in train_ds.take(1):\n",
+        "    print(f'inputs[\"encoder_inputs\"].shape: {inputs[\"encoder_inputs\"].shape}')\n",
+        "    print(f'inputs[\"decoder_inputs\"].shape: {inputs[\"decoder_inputs\"].shape}')\n",
+        "    print(f\"targets.shape: {targets.shape}\")"
+      ],
+      "execution_count": 46,
+      "outputs": [
+        {
+          "output_type": "stream",
+          "name": "stdout",
+          "text": [
+            "inputs[\"encoder_inputs\"].shape: (64, 20)\n",
+            "inputs[\"decoder_inputs\"].shape: (64, 20)\n",
+            "targets.shape: (64, 20)\n"
+          ]
+        }
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "vETfD2-WXIkI"
+      },
+      "source": [
+        "## Building the model\n",
+        "\n",
+        "Our sequence-to-sequence Transformer consists of a `TransformerEncoder`\n",
+        "and a `TransformerDecoder` chained together. To make the model aware of word order,\n",
+        "we also use a `PositionalEmbedding` layer.\n",
+        "\n",
+        "The source sequence will be pass to the `TransformerEncoder`,\n",
+        "which will produce a new representation of it.\n",
+        "This new representation will then be passed\n",
+        "to the `TransformerDecoder`, together with the target sequence so far (target words 0 to N).\n",
+        "The `TransformerDecoder` will then seek to predict the next words in the target sequence (N+1 and beyond).\n",
+        "\n",
+        "A key detail that makes this possible is causal masking\n",
+        "(see method `get_causal_attention_mask()` on the `TransformerDecoder`).\n",
+        "The `TransformerDecoder` sees the entire sequences at once, and thus we must make\n",
+        "sure that it only uses information from target tokens 0 to N when predicting token N+1\n",
+        "(otherwise, it could use information from the future, which would\n",
+        "result in a model that cannot be used at inference time)."
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "3YT6V2OHXIkJ"
+      },
+      "source": [
+        "class TransformerEncoder(layers.Layer):\n",
+        "    def __init__(self, embed_dim, dense_dim, num_heads, **kwargs):\n",
+        "        super(TransformerEncoder, self).__init__(**kwargs)\n",
+        "        self.embed_dim = embed_dim\n",
+        "        self.dense_dim = dense_dim\n",
+        "        self.num_heads = num_heads\n",
+        "        self.attention = layers.MultiHeadAttention(\n",
+        "            num_heads=num_heads, key_dim=embed_dim\n",
+        "        )\n",
+        "        self.dense_proj = keras.Sequential(\n",
+        "            [layers.Dense(dense_dim, activation=\"relu\"), layers.Dense(embed_dim),]\n",
+        "        )\n",
+        "        self.layernorm_1 = layers.LayerNormalization()\n",
+        "        self.layernorm_2 = layers.LayerNormalization()\n",
+        "        self.supports_masking = True\n",
+        "\n",
+        "    def call(self, inputs, mask=None):\n",
+        "        if mask is not None:\n",
+        "            padding_mask = tf.cast(mask[:, tf.newaxis, tf.newaxis, :], dtype=\"int32\")\n",
+        "        attention_output = self.attention(\n",
+        "            query=inputs, value=inputs, key=inputs, attention_mask=padding_mask\n",
+        "        )\n",
+        "        proj_input = self.layernorm_1(inputs + attention_output)\n",
+        "        proj_output = self.dense_proj(proj_input)\n",
+        "        return self.layernorm_2(proj_input + proj_output)\n",
+        "\n",
+        "\n",
+        "class PositionalEmbedding(layers.Layer):\n",
+        "    def __init__(self, sequence_length, vocab_size, embed_dim, **kwargs):\n",
+        "        super(PositionalEmbedding, self).__init__(**kwargs)\n",
+        "        self.token_embeddings = layers.Embedding(\n",
+        "            input_dim=vocab_size, output_dim=embed_dim\n",
+        "        )\n",
+        "        self.position_embeddings = layers.Embedding(\n",
+        "            input_dim=sequence_length, output_dim=embed_dim\n",
+        "        )\n",
+        "        self.sequence_length = sequence_length\n",
+        "        self.vocab_size = vocab_size\n",
+        "        self.embed_dim = embed_dim\n",
+        "\n",
+        "    def call(self, inputs):\n",
+        "        length = tf.shape(inputs)[-1]\n",
+        "        positions = tf.range(start=0, limit=length, delta=1)\n",
+        "        embedded_tokens = self.token_embeddings(inputs)\n",
+        "        embedded_positions = self.position_embeddings(positions)\n",
+        "        return embedded_tokens + embedded_positions\n",
+        "\n",
+        "    def compute_mask(self, inputs, mask=None):\n",
+        "        return tf.math.not_equal(inputs, 0)\n",
+        "\n",
+        "\n",
+        "class TransformerDecoder(layers.Layer):\n",
+        "    def __init__(self, embed_dim, latent_dim, num_heads, **kwargs):\n",
+        "        super(TransformerDecoder, self).__init__(**kwargs)\n",
+        "        self.embed_dim = embed_dim\n",
+        "        self.latent_dim = latent_dim\n",
+        "        self.num_heads = num_heads\n",
+        "        self.attention_1 = layers.MultiHeadAttention(\n",
+        "            num_heads=num_heads, key_dim=embed_dim\n",
+        "        )\n",
+        "        self.attention_2 = layers.MultiHeadAttention(\n",
+        "            num_heads=num_heads, key_dim=embed_dim\n",
+        "        )\n",
+        "        self.dense_proj = keras.Sequential(\n",
+        "            [layers.Dense(latent_dim, activation=\"relu\"), layers.Dense(embed_dim),]\n",
+        "        )\n",
+        "        self.layernorm_1 = layers.LayerNormalization()\n",
+        "        self.layernorm_2 = layers.LayerNormalization()\n",
+        "        self.layernorm_3 = layers.LayerNormalization()\n",
+        "        self.supports_masking = True\n",
+        "\n",
+        "    def call(self, inputs, encoder_outputs, mask=None):\n",
+        "        causal_mask = self.get_causal_attention_mask(inputs)\n",
+        "        if mask is not None:\n",
+        "            padding_mask = tf.cast(mask[:, tf.newaxis, :], dtype=\"int32\")\n",
+        "            padding_mask = tf.minimum(padding_mask, causal_mask)\n",
+        "\n",
+        "        attention_output_1 = self.attention_1(\n",
+        "            query=inputs, value=inputs, key=inputs, attention_mask=causal_mask\n",
+        "        )\n",
+        "        out_1 = self.layernorm_1(inputs + attention_output_1)\n",
+        "\n",
+        "        attention_output_2 = self.attention_2(\n",
+        "            query=out_1,\n",
+        "            value=encoder_outputs,\n",
+        "            key=encoder_outputs,\n",
+        "            attention_mask=padding_mask,\n",
+        "        )\n",
+        "        out_2 = self.layernorm_2(out_1 + attention_output_2)\n",
+        "\n",
+        "        proj_output = self.dense_proj(out_2)\n",
+        "        return self.layernorm_3(out_2 + proj_output)\n",
+        "\n",
+        "    def get_causal_attention_mask(self, inputs):\n",
+        "        input_shape = tf.shape(inputs)\n",
+        "        batch_size, sequence_length = input_shape[0], input_shape[1]\n",
+        "        i = tf.range(sequence_length)[:, tf.newaxis]\n",
+        "        j = tf.range(sequence_length)\n",
+        "        mask = tf.cast(i >= j, dtype=\"int32\")\n",
+        "        mask = tf.reshape(mask, (1, input_shape[1], input_shape[1]))\n",
+        "        mult = tf.concat(\n",
+        "            [tf.expand_dims(batch_size, -1), tf.constant([1, 1], dtype=tf.int32)],\n",
+        "            axis=0,\n",
+        "        )\n",
+        "        return tf.tile(mask, mult)\n"
+      ],
+      "execution_count": 22,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "G1EIjkKvXIkK"
+      },
+      "source": [
+        "Next, we assemble the end-to-end model."
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "cQrmskp5XIkL"
+      },
+      "source": [
+        "embed_dim = 256\n",
+        "latent_dim = 2048\n",
+        "num_heads = 8\n",
+        "\n",
+        "encoder_inputs = keras.Input(shape=(None,), dtype=\"int64\", name=\"encoder_inputs\")\n",
+        "x = PositionalEmbedding(sequence_length, vocab_size, embed_dim)(encoder_inputs)\n",
+        "encoder_outputs = TransformerEncoder(embed_dim, latent_dim, num_heads)(x)\n",
+        "encoder = keras.Model(encoder_inputs, encoder_outputs)\n",
+        "\n",
+        "decoder_inputs = keras.Input(shape=(None,), dtype=\"int64\", name=\"decoder_inputs\")\n",
+        "encoded_seq_inputs = keras.Input(shape=(None, embed_dim), name=\"decoder_state_inputs\")\n",
+        "x = PositionalEmbedding(sequence_length, vocab_size, embed_dim)(decoder_inputs)\n",
+        "x = TransformerDecoder(embed_dim, latent_dim, num_heads)(x, encoded_seq_inputs)\n",
+        "x = layers.Dropout(0.5)(x)\n",
+        "decoder_outputs = layers.Dense(vocab_size, activation=\"softmax\")(x)\n",
+        "decoder = keras.Model([decoder_inputs, encoded_seq_inputs], decoder_outputs)\n",
+        "\n",
+        "decoder_outputs = decoder([decoder_inputs, encoder_outputs])\n",
+        "transformer = keras.Model(\n",
+        "    [encoder_inputs, decoder_inputs], decoder_outputs, name=\"transformer\"\n",
+        ")"
+      ],
+      "execution_count": 23,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "uugXdDwDXIkM"
+      },
+      "source": [
+        "## Training our model\n",
+        "\n",
+        "We'll use accuracy as a quick way to monitor training progress on the validation data.\n",
+        "Note that machine translation typically uses BLEU scores as well as other metrics, rather than accuracy.\n",
+        "\n",
+        "Here we only train for 1 epoch, but to get the model to actually converge\n",
+        "you should train for at least 30 epochs."
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "ItCylotwa2zp",
+        "outputId": "13d0864e-10b1-45a9-dd88-966861c0aafb",
+        "colab": {
+          "base_uri": "https://localhost:8080/",
+          "height": 369
+        }
+      },
+      "source": [
+        "from keras.utils.vis_utils import plot_model\n",
+        "tf.keras.utils.plot_model(\n",
+        "transformer, to_file='model.png'\n",
+        ")\n",
+        "# , show_shapes=False, show_dtype=False,\n",
+        "# show_layer_names=True, rankdir='TB', expand_nested=False, dpi=96\n",
+        "# plot_model(transformer, to_file='model.png')"
+      ],
+      "execution_count": 24,
+      "outputs": [
+        {
+          "output_type": "execute_result",
+          "data": {
+            "image/png": "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\n",
+            "text/plain": [
+              "<IPython.core.display.Image object>"
+            ]
+          },
+          "metadata": {},
+          "execution_count": 24
+        }
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "d_ioQXx-XIkN",
+        "outputId": "82fafae8-e5cd-4988-9192-f2b73fa69e85",
+        "colab": {
+          "base_uri": "https://localhost:8080/"
+        }
+      },
+      "source": [
+        "epochs = 1  # This should be at least 30 for convergence\n",
+        "\n",
+        "transformer.summary()\n",
+        "transformer.compile(\n",
+        "    \"rmsprop\", loss=\"sparse_categorical_crossentropy\", metrics=[\"accuracy\"]\n",
+        ")\n",
+        "transformer.fit(train_ds, epochs=epochs)#, validation_data=val_ds"
+      ],
+      "execution_count": 53,
+      "outputs": [
+        {
+          "output_type": "stream",
+          "name": "stdout",
+          "text": [
+            "Model: \"transformer\"\n",
+            "__________________________________________________________________________________________________\n",
+            "Layer (type)                    Output Shape         Param #     Connected to                     \n",
+            "==================================================================================================\n",
+            "encoder_inputs (InputLayer)     [(None, None)]       0                                            \n",
+            "__________________________________________________________________________________________________\n",
+            "positional_embedding_2 (Positio (None, None, 256)    3845120     encoder_inputs[0][0]             \n",
+            "__________________________________________________________________________________________________\n",
+            "decoder_inputs (InputLayer)     [(None, None)]       0                                            \n",
+            "__________________________________________________________________________________________________\n",
+            "transformer_encoder_1 (Transfor (None, None, 256)    3155456     positional_embedding_2[0][0]     \n",
+            "__________________________________________________________________________________________________\n",
+            "model_3 (Functional)            (None, None, 15000)  12959640    decoder_inputs[0][0]             \n",
+            "                                                                 transformer_encoder_1[0][0]      \n",
+            "==================================================================================================\n",
+            "Total params: 19,960,216\n",
+            "Trainable params: 19,960,216\n",
+            "Non-trainable params: 0\n",
+            "__________________________________________________________________________________________________\n",
+            "1302/1302 [==============================] - 152s 113ms/step - loss: 1.3315 - accuracy: 0.5360\n"
+          ]
+        },
+        {
+          "output_type": "execute_result",
+          "data": {
+            "text/plain": [
+              "<keras.callbacks.History at 0x7ff3801e1e90>"
+            ]
+          },
+          "metadata": {},
+          "execution_count": 53
+        }
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "MkpBMxC7o7vo",
+        "outputId": "60f6eb20-08fe-464e-effc-abb0926a46c5",
+        "colab": {
+          "base_uri": "https://localhost:8080/"
+        }
+      },
+      "source": [
+        "epochs = 1  # This should be at least 30 for convergence\n",
+        "\n",
+        "transformer.summary()\n",
+        "transformer.compile(\n",
+        "    \"rmsprop\", loss=\"sparse_categorical_crossentropy\", metrics=[\"accuracy\"]\n",
+        ")\n",
+        "transformer.fit(train_ds, epochs=epochs, validation_data=val_ds)#"
+      ],
+      "execution_count": 54,
+      "outputs": [
+        {
+          "output_type": "stream",
+          "name": "stdout",
+          "text": [
+            "Model: \"transformer\"\n",
+            "__________________________________________________________________________________________________\n",
+            "Layer (type)                    Output Shape         Param #     Connected to                     \n",
+            "==================================================================================================\n",
+            "encoder_inputs (InputLayer)     [(None, None)]       0                                            \n",
+            "__________________________________________________________________________________________________\n",
+            "positional_embedding_2 (Positio (None, None, 256)    3845120     encoder_inputs[0][0]             \n",
+            "__________________________________________________________________________________________________\n",
+            "decoder_inputs (InputLayer)     [(None, None)]       0                                            \n",
+            "__________________________________________________________________________________________________\n",
+            "transformer_encoder_1 (Transfor (None, None, 256)    3155456     positional_embedding_2[0][0]     \n",
+            "__________________________________________________________________________________________________\n",
+            "model_3 (Functional)            (None, None, 15000)  12959640    decoder_inputs[0][0]             \n",
+            "                                                                 transformer_encoder_1[0][0]      \n",
+            "==================================================================================================\n",
+            "Total params: 19,960,216\n",
+            "Trainable params: 19,960,216\n",
+            "Non-trainable params: 0\n",
+            "__________________________________________________________________________________________________\n",
+            "1302/1302 [==============================] - 165s 123ms/step - loss: 1.1847 - accuracy: 0.5830 - val_loss: 1.0757 - val_accuracy: 0.6053\n"
+          ]
+        },
+        {
+          "output_type": "execute_result",
+          "data": {
+            "text/plain": [
+              "<keras.callbacks.History at 0x7ff389e98e50>"
+            ]
+          },
+          "metadata": {},
+          "execution_count": 54
+        }
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "NxrX-2yhXIkN"
+      },
+      "source": [
+        "## Decoding test sentences\n",
+        "\n",
+        "Finally, let's demonstrate how to translate brand new English sentences.\n",
+        "We simply feed into the model the vectorized English sentence\n",
+        "as well as the target token `\"[start]\"`, then we repeatedly generated the next token, until\n",
+        "we hit the token `\"[end]\"`."
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "AQ5exr2AnoLr"
+      },
+      "source": [
+        "spa_vocab = spa_vectorization.get_vocabulary()\n",
+        "spa_index_lookup = dict(zip(range(len(spa_vocab)), spa_vocab))\n",
+        "max_decoded_sentence_length = 20"
+      ],
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "nHzdpwCrnoyA"
+      },
+      "source": [
+        "# spa_index_lookup"
+      ],
+      "execution_count": 49,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "2g_3TSb_XIkO"
+      },
+      "source": [
+        "def decode_sequence(input_sentence):\n",
+        "    tokenized_input_sentence = eng_vectorization([input_sentence])\n",
+        "    decoded_sentence = \"[start]\"\n",
+        "    for i in range(max_decoded_sentence_length):\n",
+        "        tokenized_target_sentence = spa_vectorization([decoded_sentence])[:, :-1]\n",
+        "        predictions = transformer([tokenized_input_sentence, tokenized_target_sentence])\n",
+        "\n",
+        "        sampled_token_index = np.argmax(predictions[0, i, :])\n",
+        "\n",
+        "        print(sampled_token_index)\n",
+        "\n",
+        "        sampled_token = spa_index_lookup[sampled_token_index]\n",
+        "        decoded_sentence += \" \" + sampled_token\n",
+        "\n",
+        "        if sampled_token == \"[end]\":\n",
+        "            break\n",
+        "    return decoded_sentence"
+      ],
+      "execution_count": 56,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "1AKWczO2n_Uq",
+        "outputId": "a36c7027-4422-4880-92a8-e487ed0244cd",
+        "colab": {
+          "base_uri": "https://localhost:8080/"
+        }
+      },
+      "source": [
+        "test_pairs[0]"
+      ],
+      "execution_count": 51,
+      "outputs": [
+        {
+          "output_type": "execute_result",
+          "data": {
+            "text/plain": [
+              "('He was exhausted when he got home.',\n",
+              " '[start] Él estaba exhausto cuando llegó a casa. [end]')"
+            ]
+          },
+          "metadata": {},
+          "execution_count": 51
+        }
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "torIZtgjqmcs",
+        "outputId": "51af5039-90d5-4577-d2d2-612290f80087",
+        "colab": {
+          "base_uri": "https://localhost:8080/",
+          "height": 34
+        }
+      },
+      "source": [
+        "spa_index_lookup[23]"
+      ],
+      "execution_count": 59,
+      "outputs": [
+        {
+          "output_type": "execute_result",
+          "data": {
+            "application/vnd.google.colaboratory.intrinsic+json": {
+              "type": "string"
+            },
+            "text/plain": [
+              "'está'"
+            ]
+          },
+          "metadata": {},
+          "execution_count": 59
+        }
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "G4Zvdd2dlpwl",
+        "outputId": "0225fbe9-25b6-4210-e345-546c86947d71",
+        "colab": {
+          "base_uri": "https://localhost:8080/"
+        }
+      },
+      "source": [
+        "test_eng_texts = [pair[0] for pair in test_pairs]\n",
+        "for _ in range(1):\n",
+        "    input_sentence = random.choice(test_eng_texts)\n",
+        "    translated = decode_sequence(input_sentence)\n",
+        "    print(translated)"
+      ],
+      "execution_count": 57,
+      "outputs": [
+        {
+          "output_type": "stream",
+          "name": "stdout",
+          "text": [
+            "26\n",
+            "23\n",
+            "323\n",
+            "30\n",
+            "21\n",
+            "563\n",
+            "3\n",
+            "[start] ella está ocupado para los hombres [end]\n"
+          ]
+        }
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "AMO5Lk7_oKSU"
+      },
+      "source": [
+        ""
+      ],
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "uam9VvMBXIkP"
+      },
+      "source": [
+        "After 30 epochs, we get results such as:\n",
+        "\n",
+        "> She handed him the money.\n",
+        "> [start] ella le pasó el dinero [end]\n",
+        "\n",
+        "> Tom has never heard Mary sing.\n",
+        "> [start] tom nunca ha oído cantar a mary [end]\n",
+        "\n",
+        "> Perhaps she will come tomorrow.\n",
+        "> [start] tal vez ella vendrá mañana [end]\n",
+        "\n",
+        "> I love to write.\n",
+        "> [start] me encanta escribir [end]\n",
+        "\n",
+        "> His French is improving little by little.\n",
+        "> [start] su francés va a [UNK] sólo un poco [end]\n",
+        "\n",
+        "> My hotel told me to call you.\n",
+        "> [start] mi hotel me dijo que te [UNK] [end]"
+      ]
+    }
+  ]
+}
